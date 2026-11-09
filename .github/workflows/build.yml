@@ -1,0 +1,260 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/java/com/eggsteal/autoclicker
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/xml
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "EggStealAutoClicker"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.eggsteal.autoclicker'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.eggsteal.autoclicker'
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:label="Fishing Auto Clicker">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".AutoClickService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="100"
+              android:canPerformGestures="true"
+              android:description="@string/service_description"/>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="service_description">Automatic screen tapping service</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/eggsteal/autoclicker/MainActivity.kt <<'EOF'
+          package com.eggsteal.autoclicker
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.content.Intent
+          import android.provider.Settings
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val layout = LinearLayout(this)
+                  layout.orientation = LinearLayout.VERTICAL
+                  layout.setPadding(35, 60, 35, 35)
+
+                  layout.addView(TextView(this).apply {
+                      text = "Fishing Auto Clicker"
+                      textSize = 25f
+                  })
+
+                  layout.addView(TextView(this).apply {
+                      text = "화면 중앙을 1초마다 자동으로 클릭합니다."
+                      textSize = 16f
+                  })
+
+                  layout.addView(Button(this).apply {
+                      text = "접근성 설정 열기"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  })
+
+                  layout.addView(Button(this).apply {
+                      text = "자동 클릭 시작"
+                      setOnClickListener {
+                          if (AutoClickService.instance != null) {
+                              AutoClickService.instance?.startClicking()
+                              Toast.makeText(this@MainActivity, "시작!", Toast.LENGTH_SHORT).show()
+                          } else {
+                              Toast.makeText(this@MainActivity, "접근성 서비스를 먼저 켜주세요.", Toast.LENGTH_LONG).show()
+                          }
+                      }
+                  })
+
+                  layout.addView(Button(this).apply {
+                      text = "자동 클릭 정지"
+                      setOnClickListener {
+                          AutoClickService.instance?.stopClicking()
+                      }
+                  })
+
+                  setContentView(layout)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/eggsteal/autoclicker/AutoClickService.kt <<'EOF'
+          package com.eggsteal.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.accessibility.AccessibilityEvent
+
+          class AutoClickService : AccessibilityService() {
+
+              companion object {
+                  var instance: AutoClickService? = null
+              }
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var running = false
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+              }
+
+              private val clickTask = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+
+                      val metrics = resources.displayMetrics
+                      val path = Path().apply {
+                          moveTo(metrics.widthPixels / 2f, metrics.heightPixels / 2f)
+                      }
+
+                      val gesture = GestureDescription.Builder()
+                          .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+                          .build()
+
+                      dispatchGesture(gesture, null, null)
+                      handler.postDelayed(this, 1000)
+                  }
+              }
+
+              fun startClicking() {
+                  if (!running) {
+                      running = true
+                      handler.post(clickTask)
+                  }
+              }
+
+              fun stopClicking() {
+                  running = false
+                  handler.removeCallbacks(clickTask)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {
+                  stopClicking()
+              }
+
+              override fun onDestroy() {
+                  stopClicking()
+                  instance = null
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fishing-Auto-Clicker-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
